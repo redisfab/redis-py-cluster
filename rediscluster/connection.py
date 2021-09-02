@@ -217,17 +217,20 @@ class ClusterConnectionPool(ConnectionPool):
         channel = options.pop('channel', None)
 
         if not channel:
-            return self.get_random_connection()
+            return self.get_random_connection(**options)
 
         slot = self.nodes.keyslot(channel)
         node = self.get_master_node_by_slot(slot)
 
         self._checkpid()
 
-        try:
-            connection = self._available_connections.get(node["name"], []).pop()
-        except IndexError:
-            connection = self.make_connection(node)
+        if options == {}:
+            try:
+                connection = self._available_connections.get(node["name"], []).pop()
+            except IndexError:
+                connection = self.make_connection(node)
+        else:
+            connection = self.make_connection(node, **options)
 
         if node['name'] not in self._in_use_connections:
             self._in_use_connections[node['name']] = set()
@@ -257,7 +260,7 @@ class ClusterConnectionPool(ConnectionPool):
 
         return connection
 
-    def make_connection(self, node):
+    def make_connection(self, node, **options):
         """
         Create a new connection
         """
@@ -270,7 +273,9 @@ class ClusterConnectionPool(ConnectionPool):
 
         self._created_connections_per_node.setdefault(node['name'], 0)
         self._created_connections_per_node[node['name']] += 1
-        connection = self.connection_class(host=node["host"], port=node["port"], **self.connection_kwargs)
+        kwargs = self.connection_kwargs
+        kwargs.update(options)
+        connection = self.connection_class(host=node["host"], port=node["port"], custom=options != {}, **kwargs)
 
         # Must store node in the connection to make it easier to track
         connection.node = node
@@ -296,7 +301,8 @@ class ClusterConnectionPool(ConnectionPool):
             pass
             # TODO: Log.warning("Tried to release connection that did not exist any longer : {0}".format(connection))
 
-        self._available_connections.setdefault(connection.node["name"], []).append(connection)
+        if not connection._custom:
+            self._available_connections.setdefault(connection.node["name"], []).append(connection)
 
     def disconnect(self):
         """
@@ -319,51 +325,54 @@ class ClusterConnectionPool(ConnectionPool):
 
         return sum([i for i in list(self._created_connections_per_node.values())])
 
-    def get_random_connection(self):
+    def get_random_connection(self, **options):
         """
         Open new connection to random redis server.
         """
         # TODO: Should this open a new random connection or should it look if there is any
         #       open available connections and return that instead?
         for node in self.nodes.random_startup_node_ittr():
-            connection = self.get_connection_by_node(node)
+            connection = self.get_connection_by_node(node, **options)
 
             if connection:
                 return connection
 
         raise Exception("Cant reach a single startup node.")
 
-    def get_connection_by_key(self, key, command):
+    def get_connection_by_key(self, key, command, **options):
         """
         """
         if not key:
             raise RedisClusterException("No way to dispatch this command to Redis Cluster.")
 
-        return self.get_connection_by_slot(self.nodes.keyslot(key))
+        return self.get_connection_by_slot(self.nodes.keyslot(key), **options)
 
-    def get_connection_by_slot(self, slot):
+    def get_connection_by_slot(self, slot, **options):
         """
         Determine what server a specific slot belongs to and return a redis object that is connected
         """
         self._checkpid()
 
         try:
-            return self.get_connection_by_node(self.get_node_by_slot(slot))
+            return self.get_connection_by_node(self.get_node_by_slot(slot), **options)
         except (KeyError, RedisClusterException):
-            return self.get_random_connection()
+            return self.get_random_connection(**options)
 
-    def get_connection_by_node(self, node):
+    def get_connection_by_node(self, node, **options):
         """
         get a connection by node
         """
         self._checkpid()
         self.nodes.set_node_name(node)
 
-        try:
-            # Try to get connection from existing pool
-            connection = self._available_connections.get(node["name"], []).pop()
-        except IndexError:
-            connection = self.make_connection(node)
+        if options == {}:
+            try:
+                # Try to get connection from existing pool
+                connection = self._available_connections.get(node["name"], []).pop()
+            except IndexError:
+                connection = self.make_connection(node)
+        else:
+            connection = self.make_connection(node, **options)
 
         self._in_use_connections.setdefault(node["name"], set()).add(connection)
 
@@ -485,11 +494,9 @@ class ClusterBlockingConnectionPool(ClusterConnectionPool):
 
         if not channel:
             # find random startup node and try to get connection again
-            return self.get_random_connection()
+            return self.get_random_connection(**options)
         return self.get_connection_by_node(
-            self.get_master_node_by_slot(
-                self.nodes.keyslot(channel)
-            )
+            self.get_master_node_by_slot(self.nodes.keyslot(channel))
         )
 
     def get_connection_by_node(self, node):
@@ -583,16 +590,16 @@ class ClusterReadOnlyConnectionPool(ClusterConnectionPool):
 
         self.master_node_commands = ('SCAN', 'SSCAN', 'HSCAN', 'ZSCAN')
 
-    def get_connection_by_key(self, key, command):
+    def get_connection_by_key(self, key, command, **options):
         """
         """
         if not key:
             raise RedisClusterException("No way to dispatch this command to Redis Cluster.")
 
         if command in self.master_node_commands:
-            return self.get_master_connection_by_slot(self.nodes.keyslot(key))
+            return self.get_master_connection_by_slot(self.nodes.keyslot(key), **options)
         else:
-            return self.get_random_master_slave_connection_by_slot(self.nodes.keyslot(key))
+            return self.get_random_master_slave_connection_by_slot(self.nodes.keyslot(key), **options)
 
     def get_master_connection_by_slot(self, slot):
         """
@@ -601,9 +608,9 @@ class ClusterReadOnlyConnectionPool(ClusterConnectionPool):
         Do not return a random node if master node is not available for any reason.
         """
         self._checkpid()
-        return self.get_connection_by_node(self.get_node_by_slot(slot))
+        return self.get_connection_by_node(self.get_node_by_slot(slot), **options)
 
-    def get_random_master_slave_connection_by_slot(self, slot):
+    def get_random_master_slave_connection_by_slot(self, slot, **options):
         """
         Returns a random connection from the set of (master + slaves) for the
         specified slot. If connection is not reachable then return a random connection.
@@ -611,9 +618,9 @@ class ClusterReadOnlyConnectionPool(ClusterConnectionPool):
         self._checkpid()
 
         try:
-            return self.get_node_by_slot_random(self.get_node_by_slot(slot))
+            return self.get_node_by_slot_random(self.get_node_by_slot(slot), **options)
         except KeyError:
-            return self.get_random_connection()
+            return self.get_random_connection(**options)
 
     def get_node_by_slot_random(self, slot):
         """

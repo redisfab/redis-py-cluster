@@ -596,23 +596,24 @@ class RedisCluster(Redis):
             try:
                 if asking:
                     node = self.connection_pool.nodes.nodes[redirect_addr]
-                    connection = self.connection_pool.get_connection_by_node(node)
+                    connection = self.connection_pool.get_connection_by_node(node, **kwargs)
                 elif try_random_node:
-                    connection = self.connection_pool.get_random_connection()
+                    connection = self.connection_pool.get_random_connection(**kwargs)
                     try_random_node = False
                 else:
                     if self.refresh_table_asap:
                         # MOVED
-                        node = self.connection_pool.get_master_node_by_slot(slot)
+                        node = self.connection_pool.get_master_node_by_slot(slot, **kwargs)
                         self.refresh_table_asap = False
                     else:
                         node = self.connection_pool.get_node_by_slot(
                             slot,
-                            self.read_from_replicas and (command in READ_COMMANDS)
+                            self.read_from_replicas and (command in READ_COMMANDS),
+                            **kwargs
                         )
                         is_read_replica = node['server_type'] == 'slave'
 
-                    connection = self.connection_pool.get_connection_by_node(node)
+                    connection = self.connection_pool.get_connection_by_node(node, **kwargs)
 
                 log.debug("Determined node to execute : " + str(node))
 
@@ -727,7 +728,7 @@ class RedisCluster(Redis):
         res = {}
 
         for node in nodes:
-            connection = self.connection_pool.get_connection_by_node(node)
+            connection = self.connection_pool.get_connection_by_node(node, **kwargs)
 
             # copy from redis-py
             try:
